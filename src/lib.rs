@@ -47,9 +47,20 @@ impl Matrix {
             genes.push(gene.to_string());
             let before = counts.len();
             for f in fields {
-                counts.push(f.parse::<f64>().map_err(|_| {
+                let v = f.parse::<f64>().map_err(|_| {
                     RsomicsError::InvalidInput(format!("non-numeric count '{f}' for gene {gene}"))
-                })?);
+                })?;
+                if !v.is_finite() {
+                    return Err(RsomicsError::InvalidInput(format!(
+                        "non-finite count '{f}' for gene {gene}"
+                    )));
+                }
+                if v < 0.0 {
+                    return Err(RsomicsError::InvalidInput(format!(
+                        "gene {gene}: negative counts not allowed"
+                    )));
+                }
+                counts.push(v);
             }
             if counts.len() - before != n_samples {
                 return Err(RsomicsError::InvalidInput(format!(
@@ -169,12 +180,19 @@ pub fn filter_by_expr(
         Some(p) => load_lib_sizes(p, m.n_samples)?,
         None => column_sums(&m),
     };
+    if lib_size.iter().any(|&l| l <= 0.0) {
+        return Err(RsomicsError::InvalidInput(
+            "library sizes should be greater than zero".into(),
+        ));
+    }
 
     let d = &opts.defaults;
     let mss = min_sample_size(opts, m.n_samples);
     let median_lib = median(&lib_size);
     let cpm_cutoff = d.min_count / median_lib * 1e6;
-    let cpm_scale: Vec<f64> = lib_size.iter().map(|&l| 1e6 / l).collect();
+    // edgeR cpm.default: count / (lib_size / 1e6), not count * (1e6 / lib_size);
+    // the two differ by 1 ULP and flip keep at a boundary CPM == cutoff.
+    let cpm_denom: Vec<f64> = lib_size.iter().map(|&l| l / 1e6).collect();
 
     const TOL: f64 = 1e-14;
     let n_required = mss - TOL;
@@ -189,9 +207,9 @@ pub fn filter_by_expr(
     for (gene, row) in m.genes.iter().zip(m.counts.chunks_exact(m.n_samples)) {
         let mut above = 0usize;
         let mut total = 0.0f64;
-        for (&c, &k) in row.iter().zip(&cpm_scale) {
+        for (&c, &denom) in row.iter().zip(&cpm_denom) {
             total += c;
-            if c * k >= cpm_cutoff {
+            if c / denom >= cpm_cutoff {
                 above += 1;
             }
         }

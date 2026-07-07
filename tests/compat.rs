@@ -51,6 +51,66 @@ fn run_ours(extra: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+fn run_ours_on(counts: &str) -> std::process::Output {
+    Command::new(ours()).arg(golden(counts)).output().unwrap()
+}
+
+// edgeR cpm.default divides count by (lib_size/1e6); computing count*(1e6/lib_size)
+// is 1 ULP lower and flips keep at a boundary. BND's CPM in sample 1 equals the
+// cutoff (1205.4001928640309) exactly, so with `>=` it must KEEP. Oracle: filterByExpr
+// on this 2-gene matrix (no group) -> keep = [TRUE, TRUE].
+#[test]
+fn cpm_boundary_keeps() {
+    let out = Command::new(ours())
+        .arg(golden("bnd_counts.tsv"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "ours failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    diff_exact(
+        &String::from_utf8(out.stdout).unwrap(),
+        &std::fs::read_to_string(golden("bnd_keep.tsv")).unwrap(),
+    );
+}
+
+// edgeR errors 'Negative counts not allowed' -> we reject the literal loudly at parse.
+#[test]
+fn negative_count_literal_rejected() {
+    let out = run_ours_on("neg_counts.tsv");
+    assert!(!out.status.success(), "expected failure on negative count");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("negative counts not allowed"), "stderr: {err}");
+}
+
+// A NaN literal is malformed input -> reject loudly at parse (also guards the
+// NaN-contaminated median sort against a panic).
+#[test]
+fn nan_count_literal_rejected() {
+    let out = run_ours_on("nan_counts.tsv");
+    assert!(!out.status.success(), "expected failure on NaN count");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("non-finite count"), "stderr: {err}");
+}
+
+// An all-zero library COLUMN (colSums==0) makes the CPM scale invalid; edgeR errors
+// 'library sizes should be greater than zero'. Match with a loud error.
+#[test]
+fn all_zero_library_column_rejected() {
+    let out = run_ours_on("zerolib_counts.tsv");
+    assert!(
+        !out.status.success(),
+        "expected failure on all-zero library column"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("library sizes should be greater than zero"),
+        "stderr: {err}"
+    );
+}
+
 #[test]
 fn default_matches_golden() {
     diff_exact(
